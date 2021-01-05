@@ -1,5 +1,4 @@
-using System;
-using System.IO;
+﻿using System.IO;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Azure.WebJobs;
@@ -9,7 +8,7 @@ using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Microsoft.Azure.WebJobs.Extensions.SignalRService;
 
-namespace Solution_Accelerator
+namespace OpenPlatform_Functions
 {
     public static class SignalR_Processor
     {
@@ -63,4 +62,5 @@ namespace Solution_Accelerator
             return new OkObjectResult($"Received Message : {data}");
         }
     }
+
 }

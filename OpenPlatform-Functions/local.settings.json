@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "dotnet",
+    "ADT_HOST_URL": "",
+    "AzureSignalRConnectionString": "",
+    "EVENTHUB_CS": "",
+    "MAP_KEY": "",
+    "StatesetId": ""
+  }
+}
