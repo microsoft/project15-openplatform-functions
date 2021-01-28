@@ -23,7 +23,6 @@ namespace OpenPlatform_Functions
     public static class Telemetry_Processor
     {
         private const string _signalr_Hub = "telemetryhub";
-        private const string _consumer_Group = "telemetry-cg";
         private static readonly string _adtHostUrl = Environment.GetEnvironmentVariable("ADT_HOST_URL");
         private static readonly string _modelRepoUrl = Environment.GetEnvironmentVariable("ModelRepository");
         private static readonly string _gitToken = Environment.GetEnvironmentVariable("GitToken");
@@ -135,13 +134,18 @@ namespace OpenPlatform_Functions
         // leave signalrData.data to null if we do not want to send SignalR message
         private static async Task OnTelemetryReceived(NOTIFICATION_DATA signalrData, EventData eventData, ILogger log)
         {
-            double temperature = 0.0;
             string deviceId = eventData.SystemProperties["iothub-connection-device-id"].ToString();
             string model_id = string.Empty;
-            bool bUpdateADT = false;
+            var tdList = new List<TELEMETRY_DATA>();
             bool bFoundTwin = false;
+
             log.LogInformation($"OnTelemetryReceived");
             signalrData.data = Encoding.UTF8.GetString(eventData.Body.Array, eventData.Body.Offset, eventData.Body.Count);
+
+            if (string.IsNullOrEmpty(_adtHostUrl))
+            {
+                return;
+            }
 
             if (!eventData.SystemProperties.ContainsKey("dt-dataschema"))
             {
@@ -151,11 +155,6 @@ namespace OpenPlatform_Functions
             model_id = eventData.SystemProperties["dt-dataschema"].ToString();
 
             if (string.IsNullOrEmpty(model_id))
-            {
-                return;
-            }
-
-            if (string.IsNullOrEmpty(_adtHostUrl))
             {
                 return;
             }
@@ -182,15 +181,15 @@ namespace OpenPlatform_Functions
                 }
                 catch (Exception e)
                 {
-                    log.LogError($"Error Creating DigitalTwinClient failed : {e.Message}");
+                    log.LogError($"Error DigitalTwinsClient(): {e.Message}");
                     return;
                 }
             }
 
             try
             {
+                string query = $"SELECT * FROM DigitalTwins T WHERE $dtId = '{deviceId}' AND IS_OF_MODEL('{model_id}')";
                 // Make sure digital twin node exist for this device
-                var query = $"SELECT* FROM digitaltwins Device WHERE Device.$dtId = '{deviceId}'";
                 AsyncPageable<BasicDigitalTwin> asyncPageableResponse = _adtClient.QueryAsync<BasicDigitalTwin>(query);
                 await foreach (BasicDigitalTwin twin in asyncPageableResponse)
                 {
@@ -203,70 +202,84 @@ namespace OpenPlatform_Functions
             }
             catch (Exception e)
             {
-                log.LogError($"Error Creating DigitalTwinClient failed : {e.Message}");
+                log.LogError($"Error QueryAsync(): {e.Message}");
                 return;
             }
 
             if (bFoundTwin)
             {
+                BasicDigitalTwin parentTwin = await FindParentAsync(_adtClient, deviceId, "contains", log);
+
+                if (parentTwin == null)
+                {
+                    // no relationship.  Nothing to do
+                    return;
+                }
+
                 // Resolve Device Model
                 var dtmiContent = string.Empty;
                 try
                 {
                     dtmiContent = await Resolve(model_id);
                 }
-                catch
+                catch (Exception e)
                 {
+                    log.LogError($"Error Resolve(): {e.Message}");
                     return;
                 }
 
                 if (!string.IsNullOrEmpty(dtmiContent))
                 {
-
                     ModelParser parser = new ModelParser();
                     parser.DtmiResolver = DtmiResolver;
-                    //var parsedDtmis = await parser.ParseAsync(models.Values);
                     var parsedDtmis = await parser.ParseAsync(new List<string> { dtmiContent });
-                    Console.WriteLine("Parsing success!");
 
                     var interfaces = parsedDtmis.Where(r => r.Value.EntityKind == DTEntityKind.Telemetry).ToList();
+
+                    // we are interested in Temperature and Light 
+                    // Illuminance 
+                    // No Semantic for Seeed Wio Terminal
                     foreach (var dt in interfaces)
                     {
                         DTTelemetryInfo telemetryInfo = dt.Value as DTTelemetryInfo;
-
-                        if (telemetryInfo.SupplementalTypes.Count > 0)
+                        JObject signalRData = JObject.Parse(signalrData.data);
+                        var telemetryData = GetTelemetrydata(telemetryInfo, signalRData, model_id);
+                        if (telemetryData != null)
                         {
-                            foreach (var supplementalType in telemetryInfo.SupplementalTypes)
-                            {
-                                if (supplementalType.Versionless.Equals("dtmi:standard:class:Temperature"))
-                                {
-                                    JObject data = JObject.Parse(signalrData.data);
-                                    Console.WriteLine($"Found Temperature");
-                                    temperature = (double)data[telemetryInfo.Name];
-                                    bUpdateADT = true;
-                                }
-                            }
+                            tdList.Add(telemetryData);
                         }
                     }
                 }
 
-                if (bUpdateADT)
+                // Update property of parent (room)
+
+                if (tdList.Count > 0)
                 {
-                    try
+                    foreach(var telemetry in tdList)
                     {
-                        log.LogInformation($"ADT service client connection created.");
-                        var twinPatchData = new JsonPatchDocument();
-                        twinPatchData.AppendReplace("/Temperature", temperature);
-                        var updateResponse = await _adtClient.UpdateDigitalTwinAsync(deviceId, twinPatchData);
-                        log.LogInformation($"ADT Response : {updateResponse.Status}");
-                    }
-                    catch (Exception e)
-                    {
-                        log.LogError($"Error ADT : {e.Message}");
+                        log.LogInformation($"Telemetry {telemetry.name} data : {telemetry.dataDouble}/{telemetry.dataInteger}");
+                        try
+                        {
+                            var twinPatchData = new JsonPatchDocument();
+                            if (parentTwin.Contents.ContainsKey(telemetry.name))
+                            {
+                                twinPatchData.AppendReplace($"/{telemetry.name}", (telemetry.dataKind == DTEntityKind.Integer) ? telemetry.dataInteger : telemetry.dataDouble);
+                            }
+                            else
+                            {
+                                twinPatchData.AppendAdd($"/{telemetry.name}", (telemetry.dataKind == DTEntityKind.Integer) ? telemetry.dataInteger : telemetry.dataDouble);
+                            }
+
+                            var updateResponse = await _adtClient.UpdateDigitalTwinAsync(parentTwin.Id, twinPatchData);
+                            log.LogInformation($"ADT Response : {updateResponse.Status}");
+                        }
+                        catch (RequestFailedException e)
+                        {
+                            log.LogError($"Error UpdateDigitalTwinAsync():{e.Status}/{e.ErrorCode} : {e.Message}");
+                        }
                     }
                 }
             }
-
         }
 
         // Process Device Twin Change Event
@@ -294,6 +307,89 @@ namespace OpenPlatform_Functions
         {
             log.LogInformation($"OnDeviceLifecycleChanged");
             signalrData.data = JsonConvert.SerializeObject(eventData.Properties);
+        }
+
+        private static TELEMETRY_DATA GetTelemetrydata(DTTelemetryInfo telemetryInfo, JObject signalRData, string model_id)
+        {
+            TELEMETRY_DATA data = null;
+            bool bFoundData = false;
+            string semanticType = string.Empty;
+
+            if ((telemetryInfo.Schema.EntityKind == DTEntityKind.Integer) || (telemetryInfo.Schema.EntityKind == DTEntityKind.Double))
+            {
+                if ((telemetryInfo.SupplementalTypes.Count == 0) && model_id.StartsWith("dtmi:seeedkk:wioterminal:wioterminal_aziot_example"))
+                {
+                    if (telemetryInfo.Name.Equals("light"))
+                    {
+                        semanticType = "dtmi:standard:class:Illuminance";
+                        bFoundData = true;
+                    }
+                }
+                else if ((telemetryInfo.SupplementalTypes.Count == 0) && model_id.StartsWith("dtmi:seeedkk:wioterminal:wioterminal_co2checker"))
+                {
+                    if (telemetryInfo.Name.Equals("co2"))
+                    {
+                        semanticType = "";
+                        bFoundData = true;
+                    }
+                }
+                else
+                {
+                    foreach (var supplementalType in telemetryInfo.SupplementalTypes)
+                    {
+                        if ((supplementalType.Versionless.Equals("dtmi:standard:class:Temperature")) ||
+                            (supplementalType.Versionless.Equals("dtmi:standard:class:Illuminance")))
+                        {
+                            bFoundData = true;
+                            semanticType = supplementalType.Versionless;
+                            break;
+                        }
+                    }
+                }
+
+                if (bFoundData)
+                {
+                    data = new TELEMETRY_DATA();
+                    data.dataKind = telemetryInfo.Schema.EntityKind;
+                    data.name = telemetryInfo.Name;
+                    if (data.dataKind == DTEntityKind.Integer)
+                    {
+                        data.dataInteger = (long)signalRData[telemetryInfo.Name];
+                    }
+                    else
+                    {
+                        data.dataDouble = (double)signalRData[telemetryInfo.Name];
+                    }
+                    data.dataName = telemetryInfo.Name;
+                    data.semanticType = semanticType;
+                }
+            }
+
+            return data;
+        }
+        private static async Task<BasicDigitalTwin> FindParentAsync(DigitalTwinsClient client, string child, string relname, ILogger log)
+        {
+            // Find parent using incoming relationships
+            Response<BasicDigitalTwin> twin = null;
+            try
+            {
+                string sourceId = string.Empty;
+                AsyncPageable<IncomingRelationship> rels = client.GetIncomingRelationshipsAsync(child);
+
+                await foreach (IncomingRelationship ie in rels)
+                {
+                    if (ie.RelationshipName.Equals(relname))
+                    {
+                        twin = await client.GetDigitalTwinAsync<BasicDigitalTwin>(ie.SourceId);
+                        break;
+                    }
+                }
+            }
+            catch (RequestFailedException e)
+            {
+                log.LogError($"Error FindParentAsync() :{e.Status}:{e.Message}");
+            }
+            return (twin != null) ? twin.Value : null;
         }
 
         private static async Task<string> Resolve(string dtmi)
@@ -387,6 +483,16 @@ namespace OpenPlatform_Functions
             }
             // dtmi:com:example:Thermostat;1 -> dtmi/com/example/thermostat-1.json
             return $"/{dtmi.ToLowerInvariant().Replace(":", "/").Replace(";", "-")}.json";
+        }
+
+        public class TELEMETRY_DATA
+        {
+            public string dataName { get; set; }
+            public string semanticType { get; set; }
+            public DTEntityKind dataKind { get; set; }
+            public double dataDouble { get; set; }
+            public double dataInteger { get; set; }
+            public string name { get; set; }
         }
 
         public class NOTIFICATION_DATA

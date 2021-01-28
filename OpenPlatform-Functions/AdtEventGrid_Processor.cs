@@ -11,6 +11,8 @@ using Newtonsoft.Json;
 using System.Threading.Tasks;
 using Azure;
 using Azure.Core.Pipeline;
+using System.Net;
+using System.Collections.Generic;
 
 namespace OpenPlatform_Functions
 {
@@ -20,14 +22,14 @@ namespace OpenPlatform_Functions
         private static string _adtServiceUrl = Environment.GetEnvironmentVariable("ADT_HOST_URL");
         private static string _mapKey = Environment.GetEnvironmentVariable("MAP_KEY");
         private static string _mapStatesetId = Environment.GetEnvironmentVariable("StatesetId");
-        private static string _mapTemperatureUnitId = Environment.GetEnvironmentVariable("UnitId");
+        private static string _mapDatasetId = Environment.GetEnvironmentVariable("DatasetId");
         private static DigitalTwinsClient _adtClient = null;
+        private static List<MapUnit> UnitList = new List<MapUnit>();
 
         [FunctionName("AdtEventGrid_Processor")]
         public static async Task Run([EventGridTrigger] EventGridEvent eventGridEvent, ILogger log)
         {
-
-            if (!string.IsNullOrEmpty(_adtServiceUrl))
+            if (_adtClient == null && !string.IsNullOrEmpty(_adtServiceUrl))
             {
                 try
                 {
@@ -42,60 +44,129 @@ namespace OpenPlatform_Functions
                 }
             }
 
-            if (_adtClient != null)
+            if (_adtClient != null && !string.IsNullOrEmpty(_mapKey) && !string.IsNullOrEmpty(_mapStatesetId))
             {
                 if (eventGridEvent != null && eventGridEvent.Data != null)
                 {
                     string twinId = eventGridEvent.Subject.ToString();
                     JObject message = (JObject)JsonConvert.DeserializeObject(eventGridEvent.Data.ToString());
+                    string unitId = string.Empty;
 
-                    log.LogInformation($"Reading event from {twinId}: {eventGridEvent.EventType}: {message["data"]}");
+                    log.LogInformation($"Received {eventGridEvent.EventType} from {twinId} : {message["data"]}");
 
                     // Process Digital Twin Update Event for the room model
-                    if (message["data"]["modelId"].ToString() == "dtmi:com:example:Room;1")
+                    if ((message["data"]["modelId"].ToString().StartsWith("dtmi:com:example:Room")))
                     {
-                        if (!string.IsNullOrEmpty(_mapKey) && !string.IsNullOrEmpty(_mapStatesetId) && !string.IsNullOrEmpty(_mapTemperatureUnitId))
+                        // Find Unit ID from cached list
+                        MapUnit unit = UnitList.Find(x => x.twinId == twinId);
+
+                        if (unit == null)
                         {
-                            string featureId = _mapTemperatureUnitId;
-
-                            foreach (var operation in message["data"]["patch"])
+                            try
                             {
-                                if (operation["op"].ToString() == "replace" && operation["path"].ToString() == "/Temperature")
-                                {   //Update the maps feature stateset
-                                    var postcontent = new JObject(new JProperty("States", new JArray(
-                                        new JObject(new JProperty("keyName", "temperature"),
-                                             new JProperty("value", operation["value"].ToString()),
-                                             new JProperty("eventTimestamp", DateTime.Now.ToString("s"))))));
+                                // Get Digital Twin for the room being updated
+                                Response<BasicDigitalTwin> roomTwin = await _adtClient.GetDigitalTwinAsync<BasicDigitalTwin>(twinId);
 
-                                    log.LogInformation($"********* Updating {featureId} to {operation["value"].ToString()}");
+                                if (roomTwin == null)
+                                {
+                                    // this should not happen
+                                    log.LogError($"Digital Twin for {twinId} not found");
+                                    return;
+                                }
 
-                                    var response = await _httpClient.PostAsync(
-                                        $"https://atlas.microsoft.com/featureState/state?api-version=1.0&statesetID={_mapStatesetId}&featureID={featureId}&subscription-key={_mapKey}",
-                                        new StringContent(postcontent.ToString()));
+                                log.LogInformation($"Found Room Twin {roomTwin.Value.Id}");
 
-                                    log.LogInformation(await response.Content.ReadAsStringAsync());
+                                // Check if unitid is already set or not
+                                if (roomTwin.Value.Contents.ContainsKey("unitId"))
+                                {
+                                    unitId = roomTwin.Value.Contents["unitId"].ToString();
+                                    log.LogInformation($"Found Unit ID {unitId}");
+                                }
+                                else
+                                {
+                                    // Unit ID not set.
+                                    string roomNumber = string.Empty;
+                                    log.LogInformation($"Unit ID not found for {twinId}");
+
+                                    // See if this is "adding" a room number
+                                    foreach (var operation in message["data"]["patch"])
+                                    {
+                                        if (operation["op"].ToString() == "add" && operation["path"].ToString() == "/roomNumber")
+                                        {
+                                            roomNumber = operation["value"].ToString();
+                                            break;
+                                        }
+                                    }
+
+                                    if (string.IsNullOrEmpty(roomNumber))
+                                    {
+                                        if (roomTwin.Value.Contents.ContainsKey("roomNumber"))
+                                        {
+                                            roomNumber = roomTwin.Value.Contents["roomNumber"].ToString();
+                                        }
+                                    }
+
+                                    if (!string.IsNullOrEmpty(roomNumber))
+                                    {
+                                        log.LogInformation($"Getting Unit ID from Azure Map for {roomNumber}");
+                                        unitId = await getUnitId(roomNumber, log);
+                                        log.LogInformation($"Got Unit ID from Azure Map {unitId}");
+                                        if (!string.IsNullOrEmpty(unitId))
+                                        {
+                                            log.LogInformation("Caching Unit ID data");
+                                            // Cache unit ID
+                                            unit = new MapUnit();
+                                            unit.twinId = twinId;
+                                            unit.unitId = unitId;
+                                            UnitList.Add(unit);
+
+                                            // Update Room Twin so we don't have to query Azure Map.
+                                            await UpdateTwinPropertyAsync(_adtClient, twinId, "/unitId", unitId, false, log);
+                                        }
+                                    }
                                 }
                             }
+                            catch (Exception e)
+                            {
+                                log.LogError($"Error Searching Digital Twin {twinId} failed : {e.Message}");
+                                return;
+                            }
                         }
-                    }
-                    else
-                    {
-                        //Find and update parent Twin
-                        string parentId = await FindParentAsync(_adtClient, twinId, "contains", log);
-                        if (parentId != null)
+                        else
                         {
-                            log.LogInformation($"Parent ID {parentId}");
-                            // Read properties which values have been changed in each operation
+                            unitId = unit.unitId;
+                            log.LogInformation($"Unit ID {unitId} found in cache");
+                        }
+
+                        if (!string.IsNullOrEmpty(unitId))
+                        {
+                            string featureId = unitId;
+
+                            log.LogInformation($"Message Data : {message["data"]}");
+
                             foreach (var operation in message["data"]["patch"])
                             {
-                                string opValue = (string)operation["op"];
-                                if (opValue.Equals("replace"))
+                                if ((operation["path"].ToString() == "/temperature") ||
+                                    (operation["path"].ToString() == "/light") ||
+                                    (operation["path"].ToString() == "/co2"))
                                 {
-                                    string propertyPath = ((string)operation["path"]);
+                                    string opValue = operation["op"].ToString();
+                                    log.LogInformation($"Found {operation["path"].ToString().Replace("/", "")} : {operation["op"].ToString()}");
 
-                                    if (propertyPath.Equals("/Temperature"))
-                                    {
-                                        await UpdateTwinPropertyAsync(_adtClient, parentId, propertyPath, operation["value"].Value<float>(), log);
+                                    if (opValue.Equals("replace") || opValue.Equals("add"))
+                                    {   //Update the maps feature stateset
+                                        var postcontent = new JObject(new JProperty("States", new JArray(
+                                            new JObject(new JProperty("keyName", operation["path"].ToString().Replace("/", "")),
+                                                 new JProperty("value", operation["value"].ToString()),
+                                                 new JProperty("eventTimestamp", DateTime.Now.ToString("s"))))));
+
+                                        log.LogInformation($"Updating Map Unit {featureId} {operation["path"].ToString()} to {operation["value"].ToString()}");
+
+                                        var response = await _httpClient.PostAsync(
+                                            $"https://atlas.microsoft.com/featureState/state?api-version=1.0&statesetID={_mapStatesetId}&featureID={featureId}&subscription-key={_mapKey}",
+                                            new StringContent(postcontent.ToString()));
+
+                                        log.LogInformation(await response.Content.ReadAsStringAsync());
                                     }
                                 }
                             }
@@ -105,42 +176,145 @@ namespace OpenPlatform_Functions
             }
         }
 
-
-        private static async Task<string> FindParentAsync(DigitalTwinsClient client, string child, string relname, ILogger log)
-        {
-            // Find parent using incoming relationships
-            try
-            {
-                AsyncPageable<IncomingRelationship> rels = client.GetIncomingRelationshipsAsync(child);
-
-                await foreach (IncomingRelationship ie in rels)
-                {
-                    if (ie.RelationshipName == relname)
-                        return (ie.SourceId);
-                }
-            }
-            catch (RequestFailedException exc)
-            {
-                log.LogInformation($"*** Error in retrieving parent:{exc.Status}:{exc.Message}");
-            }
-            return null;
-        }
-
-        public static async Task UpdateTwinPropertyAsync(DigitalTwinsClient client, string twinId, string propertyPath, object value, ILogger log)
+        public static async Task UpdateTwinPropertyAsync(DigitalTwinsClient client, string twinId, string propertyPath, object value, bool bPatch, ILogger log)
         {
             // If the twin does not exist, this will log an error
             try
             {
                 var updateTwinData = new JsonPatchDocument();
-                updateTwinData.AppendReplace(propertyPath, value);
+
+                if (bPatch)
+                {
+                    updateTwinData.AppendReplace(propertyPath, value);
+                }
+                else
+                {
+                    updateTwinData.AppendAdd(propertyPath, value);
+                }
 
                 log.LogInformation($"UpdateTwinPropertyAsync sending {updateTwinData}");
                 await client.UpdateDigitalTwinAsync(twinId, updateTwinData);
             }
-            catch (RequestFailedException exc)
+            catch (RequestFailedException e)
             {
-                log.LogInformation($"*** Error:{exc.Status}/{exc.Message}");
+                log.LogError($"Error UpdateTwinPropertyAsync():{e.Status}/{e.ErrorCode} : {e.Message}");
             }
+        }
+
+        private static async Task<string> getUnitId(string roomNumber, ILogger log)
+        {
+            //https://github.com/Azure-Samples/LiveMaps/tree/main/src
+
+            string unitId = string.Empty;
+
+            string url = $"https://us.atlas.microsoft.com/wfs/datasets/{_mapDatasetId}/collections/unit/items?api-version=1.0&limit=1&subscription-key={_mapKey}&name={roomNumber}";
+
+            using (var client = new HttpClient())
+            {
+                log.LogInformation($"Sending GET to Map {url}");
+                HttpRequestMessage requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+                var response = await client.SendAsync(requestMessage);
+
+                if (response.StatusCode == HttpStatusCode.OK)
+                {
+                    var result = await response.Content.ReadAsStringAsync();
+
+                    log.LogInformation($"Response {result}");
+                    var features = JsonConvert.DeserializeObject<FeatureCollection>(result);
+
+                    if (features.NumberReturned == 1)
+                    {
+                        log.LogInformation($"Found a feature {features.Features[0].Id} name {features.Features[0].Properties.Name}");
+                        unitId = features.Features[0].Id;
+                    }
+                }
+                else
+                {
+                    log.LogError($"Query feature failed {response.StatusCode}");
+                }
+            }
+
+            return unitId;
+        }
+
+        public class MapUnit
+        {
+            public string twinId { get; set; }
+            public string unitId { get; set; }
+        }
+        public class FeatureCollection
+        {
+            [JsonProperty("type")]
+            public string Type { get; set; }
+
+            [JsonProperty("features")]
+            public Feature[] Features { get; set; }
+
+            [JsonProperty("numberReturned")]
+            public long NumberReturned { get; set; }
+
+            public link[] links { get; set; }
+        }
+
+        public class link
+        {
+            public string href { get; set; }
+            public string rel { get; set; }
+        }
+
+        public partial class Properties
+        {
+            [JsonProperty("originalId")]
+            public Guid OriginalId { get; set; }
+
+            [JsonProperty("categoryId")]
+            public string CategoryId { get; set; }
+
+            [JsonProperty("isOpenArea")]
+            public bool IsOpenArea { get; set; }
+
+            [JsonProperty("isRoutable")]
+            public bool isRoutable { get; set; }
+
+            [JsonProperty("routeThroughBehavior")]
+            public string RouteThroughBehavior { get; set; }
+
+            [JsonProperty("levelId")]
+            public string LevelId { get; set; }
+
+            [JsonProperty("occupants")]
+            public object[] Occupants { get; set; }
+
+            [JsonProperty("addressId")]
+            public string AddressId { get; set; }
+
+            [JsonProperty("name")]
+            public string Name { get; set; }
+        }
+        public partial class Geometry
+        {
+            [JsonProperty("type")]
+            public string Type { get; set; }
+
+            [JsonProperty("coordinates")]
+            public double[][][] Coordinates { get; set; }
+        }
+        public partial class Feature
+        {
+            [JsonProperty("type")]
+            public string Type { get; set; }
+
+            [JsonProperty("geometry")]
+            public Geometry Geometry { get; set; }
+
+            [JsonProperty("properties")]
+            public Properties Properties { get; set; }
+
+            [JsonProperty("id")]
+            public string Id { get; set; }
+
+            [JsonProperty("featureType")]
+            public string featureType { get; set; }
         }
     }
 }
