@@ -43,6 +43,8 @@ TestResult.xml
 [Rr]eleasePS/
 dlldata.c
 
+local.settings.json
+
 # DNX
 project.lock.json
 project.fragment.lock.json
@@ -262,5 +264,3 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 __pycache__/
 *.pyc
-local.settings.json
-OpenPlatform-Functions/local.settings.json
