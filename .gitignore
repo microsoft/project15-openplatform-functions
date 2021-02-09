@@ -263,3 +263,4 @@ paket-files/
 __pycache__/
 *.pyc
 local.settings.json
+OpenPlatform-Functions/local.settings.json
