@@ -4,11 +4,11 @@
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "FUNCTIONS_WORKER_RUNTIME": "dotnet",
     "ADT_HOST_URL": "",
-    "AzureSignalRConnectionString": "Endpoint=https://p15-signalr-dndemov06.service.signalr.net;AccessKey=VJr7p2b+NBmNFOt5ftUbEVXSXBvAeHHaMjwRz4SLYoI=",
-    "EVENTHUB_CS": "Endpoint=sb://p15-eventhubs-dndemov06.servicebus.windows.net/;SharedAccessKeyName=TelemetryListenRule;SharedAccessKey=42vEPRJZZLfaebOYZBByNm2plkztyCcKTfqbAvrrVFo=;EntityPath=devicetelemetryhub",
+    "AzureSignalRConnectionString": "",
+    "EVENTHUB_CS": "",
     "MAP_KEY": "",
     "StatesetId": "",
-    "ModelRepository": "https://raw.githubusercontent.com/daisukeiot/iot-plugandplay-models/main",
-    "GitToken": "7500654ccc509dc35cf98cdeb6c25a76af33f6c1"
+    "ModelRepository": "",
+    "GitToken": ""
   }
 }
