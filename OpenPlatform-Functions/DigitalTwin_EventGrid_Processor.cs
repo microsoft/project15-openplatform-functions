@@ -16,7 +16,7 @@ using System.Collections.Generic;
 
 namespace OpenPlatform_Functions
 {
-    public static class AdtEventGrid_Processor
+    public static class DigitalTwin_EventGrid_Processor
     {
         private static readonly HttpClient _httpClient = new HttpClient();
         private static string _adtServiceUrl = Environment.GetEnvironmentVariable("ADT_HOST_URL");
@@ -26,7 +26,7 @@ namespace OpenPlatform_Functions
         private static DigitalTwinsClient _adtClient = null;
         private static List<MapUnit> UnitList = new List<MapUnit>();
 
-        [FunctionName("AdtEventGrid_Processor")]
+        [FunctionName("DigitalTwin_EventGrid_Processor")]
         public static async Task Run([EventGridTrigger] EventGridEvent eventGridEvent, ILogger log)
         {
             if (_adtClient == null && !string.IsNullOrEmpty(_adtServiceUrl))
