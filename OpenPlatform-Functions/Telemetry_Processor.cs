@@ -340,7 +340,7 @@ namespace OpenPlatform_Functions
         private static void ProcessInterface(SIGNALR_DATA signalrData, IReadOnlyDictionary<Dtmi, DTEntityInfo> parsedModel, DTEntityKind entryKind, string keyName, Dtmi keyId, JToken jsonData)
         {
             _logger.LogInformation($"Key ID {keyId} kind {entryKind.ToString()} Value {jsonData}");
-
+            
             switch (entryKind)
             {
                 case DTEntityKind.Field:
@@ -354,6 +354,23 @@ namespace OpenPlatform_Functions
                 case DTEntityKind.String:
                 case DTEntityKind.Integer:
                 case DTEntityKind.Float:
+                    break;
+
+                case DTEntityKind.Object:
+                    var dtObjects = parsedModel.Where(r => r.Value.EntityKind == DTEntityKind.Field).Select(x => x.Value as DTFieldInfo).Where(x => x.Id == keyId).ToList(); 
+
+                    foreach (var dtObject in dtObjects)
+                    {
+                        if (dtObject.Schema.EntityKind == DTEntityKind.Object)
+                        {
+                            DTObjectInfo objectSchema = dtObject.Schema as DTObjectInfo;
+
+                            foreach (var objectField in objectSchema.Fields)
+                            {
+                                ProcessInterface(signalrData, parsedModel, objectField.Schema.EntityKind, objectField.Name, objectField.Id, jsonData);
+                            }
+                        }
+                    }
                     break;
                 default:
                     _logger.LogInformation($"Unsupported DTEntry Kind {entryKind.ToString()}");
