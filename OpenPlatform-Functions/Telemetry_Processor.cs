@@ -186,6 +186,11 @@ namespace OpenPlatform_Functions
                 parsedModel = await DeviceModelResolveAndParse(dtmi);
             }
 
+            //if (eventData.Properties.ContainsKey("$.sub"))
+            //{
+            //    _logger.LogInformation($"Sub {eventData.Properties["$.sub"].ToString()}");
+            //}
+
             if (parsedModel != null)
             {
                 JObject jobjSignalR = JObject.Parse(signalrData.data);
@@ -233,6 +238,11 @@ namespace OpenPlatform_Functions
             // Step 2 : check if twin exists for this device
             try
             {
+
+                if (string.IsNullOrEmpty(dtmi))
+                {
+                    return;
+                }
                 string query = $"SELECT * FROM DigitalTwins T WHERE $dtId = '{deviceId}' AND IS_OF_MODEL('{dtmi}')";
                 // Make sure digital twin node exist for this device
                 AsyncPageable<BasicDigitalTwin> asyncPageableResponse = _adtClient.QueryAsync<BasicDigitalTwin>(query);
@@ -339,7 +349,7 @@ namespace OpenPlatform_Functions
         }
         private static void ProcessInterface(SIGNALR_DATA signalrData, IReadOnlyDictionary<Dtmi, DTEntityInfo> parsedModel, DTEntityKind entryKind, string keyName, Dtmi keyId, JToken jsonData)
         {
-            _logger.LogInformation($"Key ID {keyId} kind {entryKind.ToString()} Value {jsonData}");
+            //_logger.LogInformation($"Key ID {keyId} kind {entryKind.ToString()} Value {jsonData}");
             
             switch (entryKind)
             {
